@@ -12,19 +12,22 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.LocationManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.ListView
 import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -35,12 +38,14 @@ class MainActivity : AppCompatActivity(), DaydreamBleClient.Listener {
 
     private companion object {
         const val SCAN_MILLIS = 20_000L
-        const val UI_REFRESH_MS = 60L     // ~16 fps, đủ mượt mà không nghẽn UI thread
+        const val UI_REFRESH_MS = 60L
         const val MAX_LOG_CHARS = 20_000
     }
 
     private lateinit var btnScan: Button
     private lateinit var btnDisconnect: Button
+    private lateinit var btnPerm: Button
+    private lateinit var btnLocation: Button
     private lateinit var btnClearLog: Button
     private lateinit var tvStatus: TextView
     private lateinit var tvState: TextView
@@ -69,9 +74,33 @@ class MainActivity : AppCompatActivity(), DaydreamBleClient.Listener {
 
     private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 
-    /* ------------------------------------------------------------ */
-    /*  Vòng đời                                                     */
-    /* ------------------------------------------------------------ */
+    /* ============================================================ */
+    /*  DANH SÁCH QUYỀN                                              */
+    /* ============================================================ */
+
+    /**
+     * Vị trí luôn nằm trong danh sách, kể cả Android 12+.
+     * Google nói API 31+ không cần, nhưng rất nhiều ROM vẫn trả về
+     * danh sách quét rỗng nếu app chưa có quyền vị trí.
+     */
+    private fun neededPermissions(): List<String> = buildList {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            add(Manifest.permission.BLUETOOTH_SCAN)
+            add(Manifest.permission.BLUETOOTH_CONNECT)
+        }
+        add(Manifest.permission.ACCESS_FINE_LOCATION)
+    }
+
+    private fun isGranted(p: String) =
+        ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
+
+    private fun missingPermissions() = neededPermissions().filterNot { isGranted(it) }
+
+    private fun shortName(p: String) = p.substringAfterLast('.')
+
+    /* ============================================================ */
+    /*  VÒNG ĐỜI                                                     */
+    /* ============================================================ */
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -79,6 +108,8 @@ class MainActivity : AppCompatActivity(), DaydreamBleClient.Listener {
 
         btnScan = findViewById(R.id.btnScan)
         btnDisconnect = findViewById(R.id.btnDisconnect)
+        btnPerm = findViewById(R.id.btnPerm)
+        btnLocation = findViewById(R.id.btnLocation)
         btnClearLog = findViewById(R.id.btnClearLog)
         tvStatus = findViewById(R.id.tvStatus)
         tvState = findViewById(R.id.tvState)
@@ -95,15 +126,22 @@ class MainActivity : AppCompatActivity(), DaydreamBleClient.Listener {
 
         ble = DaydreamBleClient(this, this)
 
-        btnScan.setOnClickListener { if (scanning) stopScan() else ensurePermissionsThenScan() }
-        btnDisconnect.setOnClickListener {
-            ble.close()
-            onLog("Đã yêu cầu ngắt kết nối.")
-        }
+        btnScan.setOnClickListener { if (scanning) stopScan() else ensureReadyThenScan() }
+        btnDisconnect.setOnClickListener { ble.close(); onLog("Đã yêu cầu ngắt kết nối.") }
+        btnPerm.setOnClickListener { showPermissionDialog() }
+        btnLocation.setOnClickListener { openLocationSettings() }
         btnClearLog.setOnClickListener { tvLog.text = "" }
 
         tvStatus.text = "Chưa kết nối"
-        onLog("Sẵn sàng. Giữ nút Home của tay cầm ~3 giây cho tới khi đèn LED nhấp nháy, rồi bấm Quét thiết bị.")
+        onLog("Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+        logPermissionState()
+        onLog("Giữ nút Home của tay cầm ~3 giây tới khi LED nháy, rồi bấm Quét thiết bị.")
+
+        // Hỏi quyền ngay khi mở app để bạn không phải đi tìm.
+        if (missingPermissions().isNotEmpty()) {
+            onLog("Đang xin quyền…")
+            permissionLauncher.launch(missingPermissions().toTypedArray())
+        }
         startUiLoop()
     }
 
@@ -114,69 +152,147 @@ class MainActivity : AppCompatActivity(), DaydreamBleClient.Listener {
         super.onDestroy()
     }
 
-    /* ------------------------------------------------------------ */
-    /*  Quyền                                                        */
-    /* ------------------------------------------------------------ */
-
-    private fun requiredPermissions(): Array<String> =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
-        } else {
-            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+    private fun logPermissionState() {
+        val s = neededPermissions().joinToString("  ") {
+            "${shortName(it)}=${if (isGranted(it)) "OK" else "THIẾU"}"
         }
+        onLog("Quyền: $s")
+        onLog("Dịch vụ vị trí: ${if (isLocationOn()) "đang bật" else "ĐANG TẮT"}")
+    }
+
+    /* ============================================================ */
+    /*  XIN QUYỀN                                                    */
+    /* ============================================================ */
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
-            if (result.values.all { it }) {
-                startScan()
-            } else {
-                onLog("Thiếu quyền Bluetooth/Vị trí nên không quét được. Cấp quyền trong Cài đặt > Ứng dụng.")
+            val denied = result.filterValues { !it }.keys
+            if (denied.isEmpty()) {
+                onLog("Đã cấp đủ quyền.")
+                return@registerForActivityResult
             }
+            // Nếu hệ thống không cho hiện lại hộp thoại nghĩa là người dùng đã
+            // chọn "Không hỏi lại" -> phải vào Cài đặt bật tay.
+            val permanentlyDenied = denied.any {
+                !ActivityCompat.shouldShowRequestPermissionRationale(this, it)
+            }
+            onLog("Chưa cấp: ${denied.joinToString { shortName(it) }}")
+            if (permanentlyDenied) showGoToSettingsDialog(denied.map { shortName(it) })
         }
 
-    private val enableBtLauncher =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-            if (adapter?.isEnabled == true) startScan() else onLog("Bluetooth vẫn đang tắt.")
+    private fun showPermissionDialog() {
+        val lines = neededPermissions().joinToString("\n") {
+            "${if (isGranted(it)) "✔" else "✘"}  ${shortName(it)}"
         }
+        val locLine = "\n\nDịch vụ vị trí: ${if (isLocationOn()) "đang bật" else "ĐANG TẮT"}"
+        AlertDialog.Builder(this)
+            .setTitle("Trạng thái quyền")
+            .setMessage(lines + locLine)
+            .setPositiveButton("Xin quyền còn thiếu") { _, _ ->
+                val missing = missingPermissions()
+                if (missing.isEmpty()) {
+                    onLog("Đã có đủ quyền rồi.")
+                } else {
+                    permissionLauncher.launch(missing.toTypedArray())
+                }
+            }
+            .setNeutralButton("Mở cài đặt app") { _, _ -> openAppSettings() }
+            .setNegativeButton("Đóng", null)
+            .show()
+    }
 
-    private fun ensurePermissionsThenScan() {
-        val ad = adapter
-        if (ad == null) {
-            onLog("Máy này không có Bluetooth.")
-            return
-        }
-        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)) {
-            onLog("Máy này không hỗ trợ Bluetooth Low Energy.")
-            return
-        }
-        val missing = requiredPermissions().filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }
-        if (missing.isNotEmpty()) {
-            permissionLauncher.launch(missing.toTypedArray())
-            return
-        }
-        if (!ad.isEnabled) {
-            enableBtLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
-            return
-        }
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S && !isLocationOn()) {
-            onLog("Android 11 trở xuống bắt buộc bật Dịch vụ vị trí thì mới quét BLE được.")
-            Toast.makeText(this, "Hãy bật Vị trí (Location)", Toast.LENGTH_LONG).show()
-            return
-        }
-        startScan()
+    private fun showGoToSettingsDialog(names: List<String>) {
+        AlertDialog.Builder(this)
+            .setTitle("Cần bật quyền thủ công")
+            .setMessage(
+                "Các quyền sau đã bị từ chối vĩnh viễn:\n\n${names.joinToString("\n")}\n\n" +
+                        "Mở Cài đặt > Quyền, chọn Vị trí = \"Cho phép khi dùng ứng dụng\" " +
+                        "và Thiết bị ở gần = Cho phép."
+            )
+            .setPositiveButton("Mở cài đặt") { _, _ -> openAppSettings() }
+            .setNegativeButton("Để sau", null)
+            .show()
+    }
+
+    private fun openAppSettings() {
+        runCatching {
+            startActivity(
+                Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.fromParts("package", packageName, null)
+                )
+            )
+        }.onFailure { onLog("Không mở được trang cài đặt app.") }
+    }
+
+    private fun openLocationSettings() {
+        runCatching { startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
+            .onFailure { onLog("Không mở được cài đặt vị trí.") }
     }
 
     private fun isLocationOn(): Boolean {
         val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        return lm.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
-                lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+        return runCatching {
+            lm.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+                    lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+        }.getOrDefault(false)
     }
 
-    /* ------------------------------------------------------------ */
-    /*  Quét BLE                                                     */
-    /* ------------------------------------------------------------ */
+    /* ============================================================ */
+    /*  CHUẨN BỊ RỒI QUÉT                                            */
+    /* ============================================================ */
+
+    private val enableBtLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            if (adapter?.isEnabled == true) ensureReadyThenScan() else onLog("Bluetooth vẫn đang tắt.")
+        }
+
+    private fun ensureReadyThenScan() {
+        val ad = adapter
+        if (ad == null) { onLog("Máy này không có Bluetooth."); return }
+        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)) {
+            onLog("Máy này không hỗ trợ Bluetooth Low Energy."); return
+        }
+
+        val missing = missingPermissions()
+        if (missing.isNotEmpty()) {
+            onLog("Thiếu quyền: ${missing.joinToString { shortName(it) }} → đang xin…")
+            val permanentlyDenied = missing.any {
+                !ActivityCompat.shouldShowRequestPermissionRationale(this, it) &&
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+            }
+            if (permanentlyDenied) {
+                showGoToSettingsDialog(missing.map { shortName(it) })
+            } else {
+                permissionLauncher.launch(missing.toTypedArray())
+            }
+            return
+        }
+
+        if (!ad.isEnabled) {
+            enableBtLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
+            return
+        }
+
+        if (!isLocationOn()) {
+            AlertDialog.Builder(this)
+                .setTitle("Dịch vụ vị trí đang tắt")
+                .setMessage(
+                    "Android dùng chung hạ tầng vị trí cho việc quét Bluetooth. " +
+                            "Vị trí tắt thì danh sách quét thường rỗng.\n\nBật vị trí rồi quay lại?"
+                )
+                .setPositiveButton("Mở cài đặt vị trí") { _, _ -> openLocationSettings() }
+                .setNegativeButton("Cứ quét thử") { _, _ -> startScan() }
+                .show()
+            return
+        }
+
+        startScan()
+    }
+
+    /* ============================================================ */
+    /*  QUÉT BLE                                                     */
+    /* ============================================================ */
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) = add(result)
@@ -188,18 +304,24 @@ class MainActivity : AppCompatActivity(), DaydreamBleClient.Listener {
         override fun onScanFailed(errorCode: Int) {
             scanning = false
             btnScan.text = "Quét thiết bị"
-            onLog("Quét thất bại, mã lỗi $errorCode")
+            val reason = when (errorCode) {
+                1 -> "đã quét rồi"
+                2 -> "không đăng ký được app (thử tắt/bật Bluetooth)"
+                3 -> "lỗi nội bộ"
+                4 -> "chip không hỗ trợ"
+                else -> "mã $errorCode"
+            }
+            onLog("Quét thất bại: $reason")
         }
 
         private fun add(r: ScanResult) {
             val dev = r.device
             if (found.any { it.address == dev.address }) return
 
-            val name = dev.name ?: r.scanRecord?.deviceName
+            val name = runCatching { dev.name }.getOrNull() ?: r.scanRecord?.deviceName
             val isDaydream = name?.contains("daydream", true) == true ||
                     r.scanRecord?.serviceUuids?.any { it.uuid == DaydreamUuid.SERVICE } == true
 
-            // Bỏ qua thiết bị không tên và không phải Daydream cho danh sách đỡ rối.
             if (name == null && !isDaydream) return
 
             found.add(dev)
@@ -212,16 +334,23 @@ class MainActivity : AppCompatActivity(), DaydreamBleClient.Listener {
 
     private fun startScan() {
         val scanner = adapter?.bluetoothLeScanner ?: run {
-            onLog("Không lấy được bluetoothLeScanner.")
-            return
+            onLog("Không lấy được bluetoothLeScanner. Thử tắt/bật Bluetooth."); return
         }
         found.clear(); labels.clear(); listAdapter.notifyDataSetChanged()
+
+        // Hiện luôn các thiết bị đã ghép nối, phòng khi quét không ra.
+        runCatching {
+            adapter?.bondedDevices?.forEach { dev ->
+                found.add(dev)
+                labels.add("(đã ghép nối) ${dev.name ?: "?"}\n${dev.address}")
+            }
+        }
+        if (found.isNotEmpty()) listAdapter.notifyDataSetChanged()
 
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
-        // Quét không lọc để bạn nhìn thấy mọi thiết bị; tay cầm được đánh dấu ★.
         scanner.startScan(null, settings, scanCallback)
         scanning = true
         btnScan.text = "Dừng quét"
@@ -234,12 +363,15 @@ class MainActivity : AppCompatActivity(), DaydreamBleClient.Listener {
         runCatching { adapter?.bluetoothLeScanner?.stopScan(scanCallback) }
         scanning = false
         btnScan.text = "Quét thiết bị"
-        onLog("Đã dừng quét. Tìm được ${found.size} thiết bị.")
+        onLog("Đã dừng quét. Danh sách có ${found.size} thiết bị.")
+        if (found.isEmpty()) {
+            onLog("Không thấy gì. Kiểm tra: LED tay cầm có nháy không, quyền Vị trí, dịch vụ vị trí.")
+        }
     }
 
-    /* ------------------------------------------------------------ */
-    /*  Callback từ DaydreamBleClient                                */
-    /* ------------------------------------------------------------ */
+    /* ============================================================ */
+    /*  CALLBACK TỪ BLE                                              */
+    /* ============================================================ */
 
     override fun onLog(msg: String) {
         tvLog.append("${timeFmt.format(Date())}  $msg\n")
@@ -251,10 +383,7 @@ class MainActivity : AppCompatActivity(), DaydreamBleClient.Listener {
 
     override fun onConnectionState(connected: Boolean, deviceName: String?) {
         tvStatus.text = if (connected) "Đã kết nối: ${deviceName ?: "thiết bị"}" else "Chưa kết nối"
-        if (!connected) {
-            lastState = null
-            tvState.text = "—"
-        }
+        if (!connected) { lastState = null; tvState.text = "—" }
     }
 
     override fun onBattery(percent: Int) = onLog("Pin tay cầm: $percent%")
@@ -265,11 +394,8 @@ class MainActivity : AppCompatActivity(), DaydreamBleClient.Listener {
         frameCount++
 
         val now = System.currentTimeMillis()
-        if (now - lastRateStamp >= 1000) {
-            fps = frameCount; frameCount = 0; lastRateStamp = now
-        }
+        if (now - lastRateStamp >= 1000) { fps = frameCount; frameCount = 0; lastRateStamp = now }
 
-        // Chỉ ghi log khi tổ hợp nút thay đổi → log không bị ngập 60 dòng/giây.
         val mask = (if (state.clickBtn) 1 else 0) or
                 (if (state.homeBtn) 2 else 0) or
                 (if (state.appBtn) 4 else 0) or
@@ -291,9 +417,9 @@ class MainActivity : AppCompatActivity(), DaydreamBleClient.Listener {
         }
     }
 
-    /* ------------------------------------------------------------ */
-    /*  Vòng lặp vẽ UI                                               */
-    /* ------------------------------------------------------------ */
+    /* ============================================================ */
+    /*  VẼ UI                                                        */
+    /* ============================================================ */
 
     private fun startUiLoop() {
         ui.postDelayed(object : Runnable {
@@ -309,7 +435,7 @@ class MainActivity : AppCompatActivity(), DaydreamBleClient.Listener {
         fun on(b: Boolean) = if (b) "[X]" else "[ ]"
 
         tvState.text = buildString {
-            append("seq ${s.seq}   ${fps} gói/giây\n\n")
+            append("seq ${s.seq}   $fps gói/giây\n\n")
             append("${on(s.clickBtn)} Click   ${on(s.homeBtn)} Home   ${on(s.appBtn)} App\n")
             append("${on(s.volDownBtn)} Vol-    ${on(s.volUpBtn)} Vol+\n\n")
             append(
