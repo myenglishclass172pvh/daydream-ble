@@ -1,36 +1,23 @@
-<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
-    <!-- Android 11 (API 30) trở xuống -->
-    <uses-permission android:name="android.permission.BLUETOOTH"
-        android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
-        android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
-        android:maxSdkVersion="30" />
-
-    <!-- Android 12 (API 31) trở lên -->
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
-    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-
-    <uses-feature
-        android:name="android.hardware.bluetooth_le"
-        android:required="true" />
-
-    <application
-        android:allowBackup="true"
-        android:label="Daydream BLE"
-        android:supportsRtl="true"
-        android:theme="@style/Theme.AppCompat.DayNight.NoActionBar">
-
-        <activity
-            android:name=".MainActivity"
-            android:exported="true"
-            android:label="Daydream BLE">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
-    </application>
+<!--  Android 11 (API 30) trở xuống  -->
+<uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
+<!--  Vị trí: KHÔNG giới hạn maxSdkVersion.
+         Android <= 11 bắt buộc có quyền này mới quét được BLE.
+         Android 12+ về lý thuyết không cần, nhưng nhiều ROM (Samsung, Xiaomi,
+         Oppo, Vivo...) vẫn trả về danh sách rỗng nếu thiếu nó.  -->
+<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+<!--  Android 12 (API 31) trở lên  -->
+<uses-permission android:name="android.permission.BLUETOOTH_SCAN"/>
+<uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+<uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
+<application android:allowBackup="true" android:label="Daydream BLE" android:supportsRtl="true" android:theme="@style/Theme.AppCompat.DayNight.NoActionBar">
+<activity android:name=".MainActivity" android:exported="true" android:label="Daydream BLE">
+<intent-filter>
+<action android:name="android.intent.action.MAIN"/>
+<category android:name="android.intent.category.LAUNCHER"/>
+</intent-filter>
+</activity>
+</application>
 </manifest>
